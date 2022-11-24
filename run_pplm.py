@@ -26,16 +26,18 @@ import argparse
 import json
 from operator import add
 from typing import List, Optional, Tuple, Union
-
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 from tqdm import trange
-from transformers import GPT2Tokenizer
-from transformers.file_utils import cached_path
-from transformers.modeling_gpt2 import GPT2LMHeadModel
+# from transformers import GPT2Tokenizer
+# from transformers.file_utils import cached_path
+# from transformers.modeling_gpt2 import GPT2LMHeadModel
 
+from pathlib import Path
+from transformers import AutoTokenizer, AutoModelForCausalLM 
 from pplm_classification_head import ClassificationHead
 
 PPLM_BOW = 1
@@ -86,6 +88,26 @@ DISCRIMINATOR_MODELS_PARAMS = {
     },
 }
 
+try:
+    from torch.hub import _get_torch_home
+
+    torch_cache_home = _get_torch_home()
+except ImportError:
+    torch_cache_home = os.path.expanduser(
+        os.getenv("TORCH_HOME", os.path.join(os.getenv("XDG_CACHE_HOME", "~/.cache"), "torch"))
+    )
+default_cache_path = os.path.join(torch_cache_home, "transformers")
+CLOUDFRONT_DISTRIB_PREFIX = "https://cdn.huggingface.co"
+S3_BUCKET_PREFIX = "https://s3.amazonaws.com/models.huggingface.co/bert"
+PATH = "/".join(str(Path(__file__).resolve()).split("/")[:-1])
+CONFIG = os.path.join(PATH, "config.yaml")
+ATTRIBUTES = os.path.join(PATH, "attributes.txt")
+OBJECTS = os.path.join(PATH, "objects.txt")
+PYTORCH_PRETRAINED_BERT_CACHE = os.getenv("PYTORCH_PRETRAINED_BERT_CACHE", default_cache_path)
+PYTORCH_TRANSFORMERS_CACHE = os.getenv("PYTORCH_TRANSFORMERS_CACHE", PYTORCH_PRETRAINED_BERT_CACHE)
+TRANSFORMERS_CACHE = os.getenv("TRANSFORMERS_CACHE", PYTORCH_TRANSFORMERS_CACHE)
+WEIGHTS_NAME = "pytorch_model.bin"
+CONFIG_NAME = "config.yaml"
 
 def to_var(x, requires_grad=False, volatile=False, device='cuda'):
     if torch.cuda.is_available() and device == 'cuda':
@@ -112,7 +134,6 @@ def top_k_filter(logits, k, probs=False):
         return torch.where(logits < batch_mins,
                            torch.ones_like(logits) * -BIG_CONST,
                            logits)
-
 
 def perturb_past(
         past,
@@ -934,3 +955,75 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     run_pplm_example(**vars(args))
+
+def cached_path(
+    url_or_filename,
+    cache_dir=None,
+    force_download=False,
+    proxies=None,
+    resume_download=False,
+    user_agent=None,
+    extract_compressed_file=False,
+    force_extract=False,
+    local_files_only=False,
+):
+    if cache_dir is None:
+        cache_dir = TRANSFORMERS_CACHE
+    if isinstance(url_or_filename, Path):
+        url_or_filename = str(url_or_filename)
+    if isinstance(cache_dir, Path):
+        cache_dir = str(cache_dir)
+
+    if is_remote_url(url_or_filename):
+        # URL, so get it from the cache (downloading if necessary)
+        output_path = get_from_cache(
+            url_or_filename,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            proxies=proxies,
+            resume_download=resume_download,
+            user_agent=user_agent,
+            local_files_only=local_files_only,
+        )
+    elif os.path.exists(url_or_filename):
+        # File, and it exists.
+        output_path = url_or_filename
+    elif urlparse(url_or_filename).scheme == "":
+        # File, but it doesn't exist.
+        raise EnvironmentError("file {} not found".format(url_or_filename))
+    else:
+        # Something unknown
+        raise ValueError("unable to parse {} as a URL or as a local path".format(url_or_filename))
+
+    if extract_compressed_file:
+        if not is_zipfile(output_path) and not tarfile.is_tarfile(output_path):
+            return output_path
+
+        # Path where we extract compressed archives
+        # We avoid '.' in dir name and add "-extracted" at the end: "./model.zip" => "./model-zip-extracted/"
+        output_dir, output_file = os.path.split(output_path)
+        output_extract_dir_name = output_file.replace(".", "-") + "-extracted"
+        output_path_extracted = os.path.join(output_dir, output_extract_dir_name)
+
+        if os.path.isdir(output_path_extracted) and os.listdir(output_path_extracted) and not force_extract:
+            return output_path_extracted
+
+        # Prevent parallel extractions
+        lock_path = output_path + ".lock"
+        with FileLock(lock_path):
+            shutil.rmtree(output_path_extracted, ignore_errors=True)
+            os.makedirs(output_path_extracted)
+            if is_zipfile(output_path):
+                with ZipFile(output_path, "r") as zip_file:
+                    zip_file.extractall(output_path_extracted)
+                    zip_file.close()
+            elif tarfile.is_tarfile(output_path):
+                tar_file = tarfile.open(output_path)
+                tar_file.extractall(output_path_extracted)
+                tar_file.close()
+            else:
+                raise EnvironmentError("Archive format of {} could not be identified".format(output_path))
+
+        return output_path_extracted
+
+    return output_path
