@@ -109,6 +109,10 @@ TRANSFORMERS_CACHE = os.getenv("TRANSFORMERS_CACHE", PYTORCH_TRANSFORMERS_CACHE)
 WEIGHTS_NAME = "pytorch_model.bin"
 CONFIG_NAME = "config.yaml"
 
+def is_remote_url(url_or_filename):
+    parsed = urlparse(url_or_filename)
+    return parsed.scheme in ("http", "https")
+
 def to_var(x, requires_grad=False, volatile=False, device='cuda'):
     if torch.cuda.is_available() and device == 'cuda':
         x = x.cuda()
