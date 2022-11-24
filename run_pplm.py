@@ -26,7 +26,6 @@ import argparse
 import json
 from operator import add
 from typing import List, Optional, Tuple, Union
-import os
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -43,6 +42,17 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from pplm_classification_head import ClassificationHead
 import requests
 from filelock import FileLock
+from hashlib import sha256
+import fnmatch
+from contextlib import contextmanager
+from functools import partial
+import tarfile
+import tempfile
+import shutil
+from zipfile import ZipFile, is_zipfile
+import os
+import sys
+from tqdm.auto import tqdm
 
 PPLM_BOW = 1
 PPLM_DISCRIM = 2
@@ -112,10 +122,45 @@ PYTORCH_TRANSFORMERS_CACHE = os.getenv("PYTORCH_TRANSFORMERS_CACHE", PYTORCH_PRE
 TRANSFORMERS_CACHE = os.getenv("TRANSFORMERS_CACHE", PYTORCH_TRANSFORMERS_CACHE)
 WEIGHTS_NAME = "pytorch_model.bin"
 CONFIG_NAME = "config.yaml"
-
+def http_get(
+    url,
+    temp_file,
+    proxies=None,
+    resume_size=0,
+    user_agent=None,
+):
+    ua = "python/{}".format(sys.version.split()[0])
+    if _torch_available:
+        ua += "; torch/{}".format(torch.__version__)
+    if isinstance(user_agent, dict):
+        ua += "; " + "; ".join("{}/{}".format(k, v) for k, v in user_agent.items())
+    elif isinstance(user_agent, str):
+        ua += "; " + user_agent
+    headers = {"user-agent": ua}
+    if resume_size > 0:
+        headers["Range"] = "bytes=%d-" % (resume_size,)
+    response = requests.get(url, stream=True, proxies=proxies, headers=headers)
+    if response.status_code == 416:  # Range not satisfiable
+        return
+    content_length = response.headers.get("Content-Length")
+    total = resume_size + int(content_length) if content_length is not None else None
+    progress = tqdm(
+        unit="B",
+        unit_scale=True,
+        total=total,
+        initial=resume_size,
+        desc="Downloading",
+    )
+    for chunk in response.iter_content(chunk_size=1024):
+        if chunk:  # filter out keep-alive new chunks
+            progress.update(len(chunk))
+            temp_file.write(chunk)
+    progress.close()
+    
 def is_remote_url(url_or_filename):
     parsed = urlparse(url_or_filename)
     return parsed.scheme in ("http", "https")
+
 def get_from_cache(
     url,
     cache_dir=None,
