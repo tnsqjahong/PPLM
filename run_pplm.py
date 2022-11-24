@@ -30,12 +30,14 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from torch.autograd import Variable
 from tqdm import trange
 # from transformers import GPT2Tokenizer
 # from transformers.file_utils import cached_path
 # from transformers.modeling_gpt2 import GPT2LMHeadModel
 
+from urllib.parse import urlparse
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM 
 from pplm_classification_head import ClassificationHead
