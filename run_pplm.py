@@ -41,6 +41,8 @@ from urllib.parse import urlparse
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM 
 from pplm_classification_head import ClassificationHead
+import requests
+from filelock import FileLock
 
 PPLM_BOW = 1
 PPLM_DISCRIM = 2
@@ -114,6 +116,136 @@ CONFIG_NAME = "config.yaml"
 def is_remote_url(url_or_filename):
     parsed = urlparse(url_or_filename)
     return parsed.scheme in ("http", "https")
+def get_from_cache(
+    url,
+    cache_dir=None,
+    force_download=False,
+    proxies=None,
+    etag_timeout=10,
+    resume_download=False,
+    user_agent=None,
+    local_files_only=False,
+):
+
+    if cache_dir is None:
+        cache_dir = TRANSFORMERS_CACHE
+    if isinstance(cache_dir, Path):
+        cache_dir = str(cache_dir)
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    etag = None
+    if not local_files_only:
+        try:
+            response = requests.head(url, allow_redirects=True, proxies=proxies, timeout=etag_timeout)
+            if response.status_code == 200:
+                etag = response.headers.get("ETag")
+        except (EnvironmentError, requests.exceptions.Timeout):
+            # etag is already None
+            pass
+
+    filename = url_to_filename(url, etag)
+
+    # get cache path to put the file
+    cache_path = os.path.join(cache_dir, filename)
+
+    # etag is None = we don't have a connection, or url doesn't exist, or is otherwise inaccessible.
+    # try to get the last downloaded one
+    if etag is None:
+        if os.path.exists(cache_path):
+            return cache_path
+        else:
+            matching_files = [
+                file
+                for file in fnmatch.filter(os.listdir(cache_dir), filename + ".*")
+                if not file.endswith(".json") and not file.endswith(".lock")
+            ]
+            if len(matching_files) > 0:
+                return os.path.join(cache_dir, matching_files[-1])
+            else:
+                # If files cannot be found and local_files_only=True,
+                # the models might've been found if local_files_only=False
+                # Notify the user about that
+                if local_files_only:
+                    raise ValueError(
+                        "Cannot find the requested files in the cached path and outgoing traffic has been"
+                        " disabled. To enable model look-ups and downloads online, set 'local_files_only'"
+                        " to False."
+                    )
+                return None
+
+    # From now on, etag is not None.
+    if os.path.exists(cache_path) and not force_download:
+        return cache_path
+
+    # Prevent parallel downloads of the same file with a lock.
+    lock_path = cache_path + ".lock"
+    with FileLock(lock_path):
+
+        # If the download just completed while the lock was activated.
+        if os.path.exists(cache_path) and not force_download:
+            # Even if returning early like here, the lock will be released.
+            return cache_path
+
+        if resume_download:
+            incomplete_path = cache_path + ".incomplete"
+
+            @contextmanager
+            def _resumable_file_manager():
+                with open(incomplete_path, "a+b") as f:
+                    yield f
+
+            temp_file_manager = _resumable_file_manager
+            if os.path.exists(incomplete_path):
+                resume_size = os.stat(incomplete_path).st_size
+            else:
+                resume_size = 0
+        else:
+            temp_file_manager = partial(tempfile.NamedTemporaryFile, dir=cache_dir, delete=False)
+            resume_size = 0
+
+        # Download to temporary file, then copy to cache dir once finished.
+        # Otherwise you get corrupt cache entries if the download gets interrupted.
+        with temp_file_manager() as temp_file:
+            print(
+                "%s not found in cache or force_download set to True, downloading to %s",
+                url,
+                temp_file.name,
+            )
+
+            http_get(
+                url,
+                temp_file,
+                proxies=proxies,
+                resume_size=resume_size,
+                user_agent=user_agent,
+            )
+
+        os.replace(temp_file.name, cache_path)
+
+        meta = {"url": url, "etag": etag}
+        meta_path = cache_path + ".json"
+        with open(meta_path, "w") as meta_file:
+            json.dump(meta, meta_file)
+
+    return cache_path
+
+
+def url_to_filename(url, etag=None):
+
+    url_bytes = url.encode("utf-8")
+    url_hash = sha256(url_bytes)
+    filename = url_hash.hexdigest()
+
+    if etag:
+        etag_bytes = etag.encode("utf-8")
+        etag_hash = sha256(etag_bytes)
+        filename += "." + etag_hash.hexdigest()
+
+    if url.endswith(".h5"):
+        filename += ".h5"
+
+    return filename
 
 def to_var(x, requires_grad=False, volatile=False, device='cuda'):
     if torch.cuda.is_available() and device == 'cuda':
