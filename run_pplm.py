@@ -27,10 +27,6 @@ import json
 from operator import add
 from typing import List, Optional, Tuple, Union
 import numpy as np
-import torch
-import torch.nn.functional as F
-
-from torch.autograd import Variable
 from tqdm import trange
 # from transformers import GPT2Tokenizer
 # from transformers.file_utils import cached_path
@@ -101,10 +97,18 @@ DISCRIMINATOR_MODELS_PARAMS = {
         "pretrained_model": "gpt2-medium",
     },
 }
+try:
+    import torch
+    _torch_available = True
+except ImportError:
+    _torch_available = False
+    
+import torch.nn.functional as F
+
+from torch.autograd import Variable
 
 try:
     from torch.hub import _get_torch_home
-
     torch_cache_home = _get_torch_home()
 except ImportError:
     torch_cache_home = os.path.expanduser(
